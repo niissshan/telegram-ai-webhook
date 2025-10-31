@@ -2,7 +2,7 @@
 import os
 import asyncio
 from typing import Dict, Any
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import httpx
 
@@ -12,52 +12,46 @@ if not TELEGRAM_TOKEN:
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-app = FastAPI(title="Telegram AI Webhook (Free Model)")
+app = FastAPI(title="Free Telegram AI Chatbot")
 
 class Message(BaseModel):
     update_id: int
     message: Dict[str, Any] | None = None
     edited_message: Dict[str, Any] | None = None
 
-# Two fallback free models
-PRIMARY_MODEL = "facebook/blenderbot-400M-distill"
-FALLBACK_MODEL = "microsoft/DialoGPT-medium"
 
-async def call_huggingface_model(user_text: str, model_name: str) -> str:
-    url = f"https://api-inference.huggingface.co/models/{model_name}"
+async def call_free_ai(user_text: str) -> str:
+    """
+    Calls Hugging Face's public GPT-2 model (no API key needed)
+    """
+    url = "https://api-inference.huggingface.co/models/gpt2"
+    payload = {"inputs": f"User: {user_text}\nAI:"}
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json={"inputs": user_text})
+            resp = await client.post(url, json=payload)
             data = resp.json()
 
-            # Handle "loading" or queued models
+            # Handle if model is cold-starting
             if isinstance(data, dict) and "error" in data and "loading" in data["error"].lower():
-                return "The AI model is waking up. Please try again in a few seconds."
+                return "The AI model is waking up — please try again in a few seconds."
 
-            # Extract generated text properly
+            # Extract text
             if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
-                return data[0]["generated_text"]
-            elif isinstance(data, dict) and "generated_text" in data:
-                return data["generated_text"]
+                reply = data[0]["generated_text"].split("AI:")[-1].strip()
+                return reply or "I'm here! How can I help you today?"
+            else:
+                return "I'm here! How can I help you today?"
 
-            return "Sorry, I couldn’t generate a proper response."
     except Exception as e:
-        return f"Error contacting Hugging Face model: {str(e)}"
+        return f"Temporary issue contacting AI service: {str(e)}"
 
-async def call_ai(user_text: str) -> str:
-    # Try primary first, fallback if empty
-    reply = await call_huggingface_model(user_text, PRIMARY_MODEL)
-    if "couldn’t" in reply or "Error" in reply:
-        reply = await call_huggingface_model(user_text, FALLBACK_MODEL)
-    return reply.strip()
 
 async def send_message(chat_id: int, text: str):
     url = f"{TELEGRAM_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(url, json=payload)
-        r.raise_for_status()
-        return r.json()
+        await client.post(url, json=payload)
+
 
 @app.post("/webhook")
 async def telegram_webhook(update: Message, request: Request):
@@ -73,11 +67,6 @@ async def telegram_webhook(update: Message, request: Request):
         await send_message(chat_id, "Please send text only 🙂")
         return {"ok": True}
 
-    if len(text) > 2000:
-        await send_message(chat_id, "Please send shorter messages (under 2000 chars).")
-        return {"ok": True}
-
-    reply = await call_ai(text)
+    reply = await call_free_ai(text)
     await send_message(chat_id, reply)
-
     return {"ok": True}
