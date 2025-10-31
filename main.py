@@ -1,48 +1,44 @@
+# main.py
 import os
 import asyncio
 from typing import Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
-from dotenv import load_dotenv
 import httpx
 
-load_dotenv()
-
+# Telegram bot token (from Render environment)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-
-if not TELEGRAM_TOKEN or not HUGGINGFACE_API_KEY:
-    raise RuntimeError("Set TELEGRAM_TOKEN and HUGGINGFACE_API_KEY in environment")
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("Set TELEGRAM_TOKEN in environment")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
 
-app = FastAPI(title="Telegram AI Webhook")
+app = FastAPI(title="Telegram AI Webhook (Free Model)")
 
 class Message(BaseModel):
     update_id: int
     message: Dict[str, Any] | None = None
     edited_message: Dict[str, Any] | None = None
 
-async def call_huggingface(user_text: str) -> str:
-    headers = {
-        "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "inputs": f"You are a helpful Telegram assistant. Reply concisely.\nUser: {user_text}\nAssistant:",
-        "parameters": {"max_new_tokens": 200, "temperature": 0.6}
-    }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(HUGGINGFACE_API_URL, headers=headers, json=payload)
-        if r.status_code != 200:
-            raise RuntimeError(f"HuggingFace error {r.status_code}: {r.text}")
-        data = r.json()
-        # Output format may differ depending on model
-        if isinstance(data, list) and len(data) and "generated_text" in data[0]:
-            return data[0]["generated_text"].split("Assistant:")[-1].strip()
-        return "Sorry, I couldn’t understand that right now."
+# 🧠 Free Hugging Face model endpoint (no API key needed)
+HF_MODEL_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
+
+async def call_ai_model(user_text: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(HF_MODEL_URL, json={"inputs": user_text})
+            data = response.json()
+            # Handle possible API formats
+            if isinstance(data, list) and len(data) > 0:
+                return data[0].get("generated_text", "Sorry, I couldn’t generate a response.")
+            elif isinstance(data, dict) and "generated_text" in data:
+                return data["generated_text"]
+            else:
+                return "Sorry, I couldn’t understand the response."
+    except Exception as e:
+        return f"Error contacting AI model: {str(e)}"
+
 
 async def send_message(chat_id: int, text: str):
     url = f"{TELEGRAM_API_URL}/sendMessage"
@@ -51,6 +47,7 @@ async def send_message(chat_id: int, text: str):
         r = await client.post(url, json=payload)
         r.raise_for_status()
         return r.json()
+
 
 @app.post("/webhook")
 async def telegram_webhook(update: Message, request: Request):
@@ -70,15 +67,7 @@ async def telegram_webhook(update: Message, request: Request):
         await send_message(chat_id, "Please send shorter messages (under 2000 chars).")
         return {"ok": True}
 
-    try:
-        reply = await call_huggingface(text)
-    except Exception as e:
-        await send_message(chat_id, f"AI error: {e}")
-        return {"ok": False, "error": str(e)}
-
-    try:
-        await send_message(chat_id, reply)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed sending message: {e}")
+    reply = await call_ai_model(text)
+    await send_message(chat_id, reply)
 
     return {"ok": True}
