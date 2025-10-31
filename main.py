@@ -5,20 +5,18 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
-from openai import OpenAI  # ✅ New import for OpenAI v2
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise RuntimeError("Set TELEGRAM_TOKEN and OPENAI_API_KEY in environment")
-
-# ✅ Create OpenAI client (v2 style)
-client = OpenAI(api_key=OPENAI_API_KEY)
+if not TELEGRAM_TOKEN or not HUGGINGFACE_API_KEY:
+    raise RuntimeError("Set TELEGRAM_TOKEN and HUGGINGFACE_API_KEY in environment")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
+
 app = FastAPI(title="Telegram AI Webhook")
 
 class Message(BaseModel):
@@ -26,20 +24,25 @@ class Message(BaseModel):
     message: Dict[str, Any] | None = None
     edited_message: Dict[str, Any] | None = None
 
-async def call_openai(user_text: str) -> str:
-    def sync_call():
-        # ✅ Updated syntax for new API
-        resp = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a friendly, concise assistant that helps users on Telegram."},
-                {"role": "user", "content": user_text}
-            ],
-            max_tokens=500,
-            temperature=0.6,
-        )
-        return resp.choices[0].message.content.strip()
-    return await asyncio.to_thread(sync_call)
+async def call_huggingface(user_text: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "inputs": f"You are a helpful Telegram assistant. Reply concisely.\nUser: {user_text}\nAssistant:",
+        "parameters": {"max_new_tokens": 200, "temperature": 0.6}
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(HUGGINGFACE_API_URL, headers=headers, json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(f"HuggingFace error {r.status_code}: {r.text}")
+        data = r.json()
+        # Output format may differ depending on model
+        if isinstance(data, list) and len(data) and "generated_text" in data[0]:
+            return data[0]["generated_text"].split("Assistant:")[-1].strip()
+        return "Sorry, I couldn’t understand that right now."
 
 async def send_message(chat_id: int, text: str):
     url = f"{TELEGRAM_API_URL}/sendMessage"
@@ -68,10 +71,9 @@ async def telegram_webhook(update: Message, request: Request):
         return {"ok": True}
 
     try:
-        reply = await call_openai(text)
+        reply = await call_huggingface(text)
     except Exception as e:
-        print("❌ Error calling OpenAI:", e)  # ✅ Log error in Render logs
-        await send_message(chat_id, "Sorry — I couldn't reach the AI service right now.")
+        await send_message(chat_id, f"AI error: {e}")
         return {"ok": False, "error": str(e)}
 
     try:
