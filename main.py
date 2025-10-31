@@ -1,4 +1,3 @@
-# main.py
 import os
 import asyncio
 from typing import Dict, Any
@@ -6,7 +5,7 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
-import openai
+from openai import OpenAI  # ✅ New import for OpenAI v2
 
 load_dotenv()
 
@@ -16,9 +15,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
     raise RuntimeError("Set TELEGRAM_TOKEN and OPENAI_API_KEY in environment")
 
-openai.api_key = OPENAI_API_KEY
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+# ✅ Create OpenAI client (v2 style)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 app = FastAPI(title="Telegram AI Webhook")
 
 class Message(BaseModel):
@@ -28,7 +28,8 @@ class Message(BaseModel):
 
 async def call_openai(user_text: str) -> str:
     def sync_call():
-        resp = openai.ChatCompletion.create(
+        # ✅ Updated syntax for new API
+        resp = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a friendly, concise assistant that helps users on Telegram."},
@@ -37,7 +38,7 @@ async def call_openai(user_text: str) -> str:
             max_tokens=500,
             temperature=0.6,
         )
-        return resp["choices"][0]["message"]["content"].strip()
+        return resp.choices[0].message.content.strip()
     return await asyncio.to_thread(sync_call)
 
 async def send_message(chat_id: int, text: str):
@@ -69,6 +70,7 @@ async def telegram_webhook(update: Message, request: Request):
     try:
         reply = await call_openai(text)
     except Exception as e:
+        print("❌ Error calling OpenAI:", e)  # ✅ Log error in Render logs
         await send_message(chat_id, "Sorry — I couldn't reach the AI service right now.")
         return {"ok": False, "error": str(e)}
 
